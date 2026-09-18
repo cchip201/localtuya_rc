@@ -397,7 +397,35 @@ class TuyaRC(RemoteEntity):
                 self._device.study_end()
                 status = self._device.status()
             _LOGGER.debug(f"Device status: {status}")
-            self._available = bool(status) and "Error" not in status
+            if status is None:
+                # The device answered, it just has nothing to report. Some IR
+                # blasters expose NO datapoints at all, so status() legitimately
+                # yields None for the whole life of a perfectly healthy device.
+                # Measured on a ZC-ZK UFO-R6 (2026-09-17): detect_available_dps()
+                # returns {} — nothing in the 201/202 range control type 1 polls,
+                # and nothing in the 1-13 range control type 2 polls — while
+                # send_button() works perfectly on the very same connection.
+                #
+                # Treating that as unavailable is not cosmetic. Home Assistant
+                # skips service calls to an unavailable entity, logging
+                # "Referenced entities ... are missing or not currently
+                # available", so remote.send_command silently does nothing and
+                # returns success. Every automation against such a blaster is a
+                # no-op that reports as a pass.
+                #
+                # This does NOT weaken offline detection, because a device that
+                # is genuinely gone does not return None. Measured against the
+                # same device on the same day:
+                #     unreachable address -> {'Err': '901', 'Error': 'Network
+                #                             Error: Unable to Connect'}
+                #     wrong local key     -> {'Err': '900', 'Error': 'Invalid
+                #                             JSON Response from Device'}
+                #     alive, no datapoints-> None
+                # Only the last case is treated as available; both failures still
+                # fall through to the dict branch below and mark the device down.
+                self._available = True
+            else:
+                self._available = bool(status) and "Error" not in status
             if not self._available:
                 _LOGGER.error("Device is not available, status: %s", status)
         except Exception as e:
