@@ -207,8 +207,8 @@ def test_reachable_silent_device_wakes_after_study_end(
 
 @pytest.mark.parametrize(
     "retry_status",
-    [None, _status_error("902"), _status_error("900")],
-    ids=["empty-response", "timeout", "json-error"],
+    [_status_error("902"), _status_error("900")],
+    ids=["timeout", "json-error"],
 )
 def test_silent_device_remains_unavailable_after_one_wake_retry(
     remote_module, retry_status
@@ -222,6 +222,21 @@ def test_silent_device_remains_unavailable_after_one_wake_retry(
     assert device_class.instance.status_calls == 2
     assert device_class.instance.study_end_calls == 1
     assert device_class.instance.closed is True
+
+
+def test_a_device_with_no_datapoints_is_alive_after_the_wake_retry(remote_module):
+    """cmcore 18a52c1 (2026-09-17): a ZC-ZK UFO-R6 exposes NO datapoints, so status() answers None for the
+    whole life of a healthy device, and send_button() works on the same connection. An unreachable device
+    answers Err 901 instead, so None after the wake retry is alive - this was upstream's 'empty-response'
+    case of the test above, which the fork deliberately changed."""
+
+    remote, device_class = _make_remote(remote_module, [None, None])
+    remote._update_availibility_locked()
+
+    assert remote.available is True
+    assert device_class.instance.status_calls == 2
+    assert device_class.instance.study_end_calls == 1
+    assert device_class.instance.closed is False
 
 
 @pytest.mark.parametrize("error_code", ["901", "904", "905", "914"])
@@ -298,3 +313,40 @@ def test_requires_tinytuya_timeout_error_support():
     version = tuple(int(part) for part in requirement.split(">=", 1)[1].split("."))
 
     assert version >= (1, 20, 0)
+
+
+def test_an_unreachable_blaster_is_logged_once_not_on_every_poll(remote_module, caplog):
+    """cmcore 2026-10-01: an unreachable blaster logged an ERROR on every poll (~125 an hour), 140 of the
+    212 errors Home Assistant kept. One WARNING for the outage, DEBUG while it lasts, one INFO when it ends."""
+    import logging
+
+    answers = [_status_error("901")] * 3 + [{"201": "ok"}]
+
+    class Device:
+        def __init__(self, **_kwargs):
+            self.control_type = 1
+
+        def status(self):
+            return answers.pop(0)
+
+        def study_end(self):
+            pass
+
+        def close(self):
+            pass
+
+    remote_module.Contrib.IRRemoteControlDevice = Device
+    remote = remote_module.TuyaRC("Test", "device-id", "127.0.0.1", "local-key", "3.3", control_type=1)
+    remote._persist_control_type = lambda _ct: None
+    caplog.set_level(logging.DEBUG, logger=remote_module.__name__)
+    for _ in range(3):
+        remote._update_availibility_locked()
+    assert remote.available is False
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and "not available" in warnings[0].getMessage()
+    assert sum("still not available" in r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG) == 2
+    remote._update_availibility_locked()
+    assert remote.available is True
+    infos = [r for r in caplog.records if r.levelno == logging.INFO and "available again" in r.getMessage()]
+    assert len(infos) == 1
+    assert len([r for r in caplog.records if r.levelno >= logging.WARNING]) == 1

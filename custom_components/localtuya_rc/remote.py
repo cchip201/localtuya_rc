@@ -123,6 +123,11 @@ class TuyaRC(RemoteEntity):
         self._storage = None
         self._codes = {}
         self._available = False
+        # cmcore (2026-10-01): an unreachable blaster logged an ERROR on EVERY poll - ~125 lines an
+        # hour for one standing condition, 140 of the 212 errors Home Assistant kept, so the daily
+        # log read reached back only 1.2 h. The outage is logged once (WARNING) and its end once
+        # (INFO); the polls in between log at DEBUG.
+        self._down_logged = False
 
         self._device = None
         self._device_RF = None
@@ -427,10 +432,20 @@ class TuyaRC(RemoteEntity):
             else:
                 self._available = bool(status) and "Error" not in status
             if not self._available:
-                _LOGGER.error("Device is not available, status: %s", status)
+                if self._down_logged:
+                    _LOGGER.debug("Device %s still not available, status: %s", self._dev_id, status)
+                else:
+                    _LOGGER.warning("Device %s is not available, status: %s - logged once until it is back",
+                                    self._dev_id, status)
+                    self._down_logged = True
         except Exception as e:
             self._available = False
-            _LOGGER.error("Failed to update device, exception %s: %s", type(e), e, exc_info=True)
+            if self._down_logged:
+                _LOGGER.debug("Device %s still failing to update, exception %s: %s", self._dev_id, type(e), e)
+            else:
+                _LOGGER.warning("Failed to update device %s, exception %s: %s - logged once until it is back",
+                                self._dev_id, type(e), e, exc_info=True)
+                self._down_logged = True
         # If status succeeded but tinytuya could not detect the control_type
         # (e.g. device was offline at the time of construction), force a
         # full re-init on the next poll so detection is retried with a now
@@ -451,6 +466,9 @@ class TuyaRC(RemoteEntity):
             self._persist_control_type(self._control_type)
         if not self._available:
             self._deinit()
+        elif self._down_logged:
+            _LOGGER.info("Device %s is available again", self._dev_id)
+            self._down_logged = False
         _LOGGER.debug("Device %s is available: %s", self._dev_id, self._available)
 
     async def async_update(self):
